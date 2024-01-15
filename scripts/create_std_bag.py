@@ -3,6 +3,8 @@ import os
 from glob import glob
 import pandas as pd
 import cv2
+import drone_racing_msgs
+from drone_racing_msgs.msg import DroneState, SensorImu
 from sensor_msgs.msg import Imu
 from geometry_msgs.msg import PoseStamped
 from cv_bridge import CvBridge
@@ -36,6 +38,17 @@ def create_imu_msg(timestamp, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z)
     imu_msg.angular_velocity.z = gyro_z
     return imu_msg
 
+def create_sensor_imu_msg(timestamp, accel_x, accel_y, accel_z, gyro_x, gyro_y, gyro_z):
+    imu_msg = SensorImu()
+    imu_msg.timestamp = timestamp
+    imu_msg.accel_x = accel_x
+    imu_msg.accel_y = accel_y
+    imu_msg.accel_z = accel_z
+    imu_msg.gyro_x = gyro_x
+    imu_msg.gyro_y = gyro_y
+    imu_msg.gyro_z = gyro_z
+    return imu_msg
+
 def create_pose_msg(timestamp, pose):
     assert len(str(timestamp)) == 19
     pose_img = PoseStamped()
@@ -43,6 +56,13 @@ def create_pose_msg(timestamp, pose):
     pose_img.header.stamp.nanosec = timestamp % 1000000000
     pose_img.pose = pose
     return pose_img
+
+def create_drone_state_msg(timestamp, pose, velocity):
+    drone_state_msg = DroneState()
+    drone_state_msg.timestamp = timestamp
+    drone_state_msg.pose = pose
+    drone_state_msg.velocity = velocity
+    return drone_state_msg
 
 def create_image_msg(image_path, timestamp):
     assert len(str(timestamp)) == 19
@@ -64,6 +84,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--flight', required=True, help="Flight ID (e.g., flight-01p-ellipse)")
     args = parser.parse_args()
+    print(drone_racing_msgs.msg.__file__)
 
     flight_type = "piloted" if "p-" in args.flight else "autonomous"
     flight_dir = os.path.join("..", "data", flight_type, args.flight)
@@ -121,29 +142,14 @@ def main():
     writer.open(storage_options, converter_options)
 
     # create topics
-    create_topic(writer, '/sensors/imu', 'sensor_msgs/msg/Imu')
+    create_topic(writer, '/sensors/imu', 'drone_racing_msgs/SensorImu')
     create_topic(writer, '/camera/image', 'sensor_msgs/msg/Image')
-    create_topic(writer, '/perception/drone_state', 'geometry_msgs/PoseStamped')
-
-    print("Converting IMU...")
-    for _, row in imu_df.iterrows():
-        imu_msg = create_imu_msg(
-            convert_to_nanosec(int(row["timestamp"])),
-            row["accel_x"], row["accel_y"], row["accel_z"],
-            row["gyro_x"], row["gyro_y"], row["gyro_z"]
-        )
-        writer.write('/sensors/imu', serialize_message(imu_msg), int(convert_to_nanosec(row["timestamp"])))
-    
-    print("Converting POSE...")
-    for _, row in qualisys_df.iterrows():
-        pose_msg = create_pose_msg(
-            convert_to_nanosec(int(row["timestamp"])),
-            row["pose"]
-        )
-        writer.write('/perception/drone_state', serialize_message(pose_msg), int(convert_to_nanosec(row["timestamp"])))
+    create_topic(writer, '/perception/drone_state', 'drone_racing_msgs/DroneState')
     
     print("Converting IMAGE...(it may take several GBs)")
     images = sorted(glob(image_path + "*"))
+    first_image_timestamp = images[0].split('_')[-1].split('.')[0]
+    print(image_path)
     for image in images:
         timestamp = image.split('_')[-1].split('.')[0]
         image_msg = create_image_msg(
@@ -152,6 +158,28 @@ def main():
         )
         #print(image_msg.header.stamp.sec, image_msg.header.stamp.nanosec, 'IMAGE')
         writer.write('/camera/image', serialize_message(image_msg), convert_to_nanosec(int(timestamp)))
+
+    print("Converting IMU...")
+    for _, row in imu_df.iterrows():
+        if row["timestamp"] < int(first_image_timestamp):
+            continue
+        imu_msg = create_sensor_imu_msg(
+            int(row["timestamp"]),
+            row["accel_x"], row["accel_y"], row["accel_z"],
+            row["gyro_x"], row["gyro_y"], row["gyro_z"]
+        )
+        writer.write('/sensors/imu', serialize_message(imu_msg), int(convert_to_nanosec(row["timestamp"])))
+
+    print("Converting POSE...")
+    for _, row in qualisys_df.iterrows():
+        if row["timestamp"] < int(first_image_timestamp):
+            continue
+        pose_msg = create_drone_state_msg(
+            row["timestamp"],
+            row["pose"],
+            row["velocity"]
+        )
+        writer.write('/perception/drone_state', serialize_message(pose_msg), int(convert_to_nanosec(row["timestamp"])))
 
     del writer
 
